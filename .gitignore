@@ -4,3 +4,6 @@ tests/__pycache__
 .pytest_cache
 __pycache__
 .streamlit/secrets.toml
+database_test_files
+database_test_files/database.py
+serviceAccountKey.json

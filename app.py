@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
 from tsp_algorithms import run_tsp_algorithms
+from google.cloud import firestore
 from dotenv import load_dotenv
 from database import db
 
@@ -413,8 +414,7 @@ elif st.session_state.page == "evaluate_path":
         selected,
         ','.join(user_path),
         user_distance,
-        True,
-        is_optimal,
+        is_optimal, 
         ' -> '.join(best_path_names),
         best_result['cost']
     )
@@ -454,60 +454,58 @@ elif st.session_state.page == "algorithm_performance":
     """)
 
     try:
-        # Query the last 30 algorithm entries (3 algorithms × 10 rounds)
-        query = """
-            SELECT ap.algorithm_name, ap.execution_time, gr.timestamp
-            FROM tsp_algorithm_performance ap
-            JOIN tsp_game_results gr ON ap.game_id = gr.game_id
-            ORDER BY gr.timestamp DESC
-            LIMIT 30
-        """
-        cursor = db.connection.cursor(dictionary=True)
-        cursor.execute(query)
-        data = cursor.fetchall()
-        cursor.close()
+        # Fetch last 10 game results
+        game_results = db.query(
+            "tsp_game_results",
+            order_by="timestamp",
+            direction=firestore.Query.DESCENDING,
+            limit=10
+        )
+        # Extract game IDs (already sorted by timestamp descending)
+        game_ids = [game["id"] for game in game_results]
+
+        # Fetch algorithm performances for these games
+        data = []
+        for i, game_id in enumerate(game_ids):
+            perf_docs = db.query(
+                "tsp_algorithm_performance",
+                filters=[("game_id", "==", game_id)]
+            )
+            for perf in perf_docs:
+                data.append({
+                    "Game Round": len(game_ids) - i,  # Most recent game gets highest number
+                    "algorithm_name": perf["algorithm_name"],
+                    "execution_time": perf["execution_time"]
+                })
 
         if data:
-            # Create DataFrame from raw data
+            # Create DataFrame
             df = pd.DataFrame(data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.sort_values(by='timestamp', ascending=False)
+            df = df.sort_values(by='Game Round', ascending=True)
 
-            # Add Game Round index (latest = highest)
-            df['Round Index'] = df.groupby('timestamp').ngroup()
-            df['Game Round'] = df['Round Index'].max() - df['Round Index']
-
-            # Pivot the DataFrame
+            # Create pivot table
             pivot_df = df.pivot(index='Game Round', columns='algorithm_name', values='execution_time')
-
-            # Rename columns for display
-            pivot_df = pivot_df.rename(columns={
-                'Brute Force': 'Brute Force (seconds)',
-                'Held-Karp': 'Held-Karp (seconds)',
-                'Nearest Neighbor': 'Nearest Neighbor (seconds)'
-            }).reset_index()
 
             # Display bar chart
             fig = px.bar(
                 df,
-                x="algorithm_name",
+                x="Game Round",
                 y="execution_time",
                 color="algorithm_name",
                 title="Algorithm Execution Times (Last 10 Game Rounds)",
-                labels={"algorithm_name": "Algorithm", "execution_time": "Time (seconds)"},
+                labels={"Game Round": "Game Round", "execution_time": "Time (seconds)", "algorithm_name": "Algorithm"},
                 barmode="group"
             )
             st.plotly_chart(fig)
 
-            # Display pivoted raw data table
+            # Display pivot table
             st.subheader("Performance by Game Round")
             st.dataframe(pivot_df)
         else:
             st.warning("No performance data available. Play some games to generate data!")
     except Exception as e:
         st.error(f"Failed to fetch performance data: {e}")
-
-
+        
 # --- Page: Leaderboard ---
 elif st.session_state.page == "leaderboard":
     st.title("🏆 Leaderboard")
@@ -517,30 +515,31 @@ elif st.session_state.page == "leaderboard":
     """)
 
     try:
-        # Query top 10 players with optimal paths
-        query = """
-            SELECT 
-                player_name, 
-                COUNT(*) as optimal_count, 
-                MIN(user_distance) as best_distance,
-                MAX(timestamp) as last_played
-            FROM tsp_game_results
-            WHERE is_optimal = TRUE
-            AND player_name IS NOT NULL AND player_name != ''
-            GROUP BY player_name
-            ORDER BY optimal_count DESC, best_distance ASC
-            LIMIT 10
-        """
-        cursor = db.connection.cursor(dictionary=True)
-        cursor.execute(query)
-        data = cursor.fetchall()
-        cursor.close()
+        # Fetch all optimal game results
+        optimal_games = db.query(
+            "tsp_game_results",
+            filters=[("is_optimal", "==", True)]
+        )
+        if optimal_games:
+            # Create DataFrame
+            df = pd.DataFrame(optimal_games)
+            # Filter out invalid player names
+            df = df[df['player_name'].notnull() & (df['player_name'] != '')]
+            # Aggregate data
+            leaderboard = df.groupby('player_name').agg(
+                optimal_count=('player_name', 'count'),
+                best_distance=('user_distance', 'min'),
+                last_played=('timestamp', 'max')
+            ).reset_index()
+            # Sort and limit to top 10
+            leaderboard = leaderboard.sort_values(
+                by=['optimal_count', 'best_distance'], ascending=[False, True]
+            ).head(10)
+            # Set index to start at 1
+            leaderboard.index = leaderboard.index + 1
 
-        if data:
-            df = pd.DataFrame(data)
             st.subheader("Top Players")
-            df.index = df.index + 1  # Make index start at 1
-            st.dataframe(df.style.format({
+            st.dataframe(leaderboard.style.format({
                 'best_distance': '{:.0f} units',
                 'last_played': lambda x: x.strftime('%Y-%m-%d %H:%M') if pd.notnull(x) else ''
             }))

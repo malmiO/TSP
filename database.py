@@ -1,146 +1,88 @@
-import json
-import os
-import mysql.connector
-from mysql.connector import Error
-from dotenv import load_dotenv
+import streamlit as st
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# Load environment variables
-load_dotenv()
-
-class Database:
-    def __init__(self):
-        self.connection = None
-        self.connect()
-
-    def connect(self):
-        """Establish a connection to the MySQL database using environment variables."""
-        try:
-            self.connection = mysql.connector.connect(
-                host=os.environ["DB_HOST"],
-                port=int(os.environ["DB_PORT"]),
-                user=os.environ["DB_USER"],
-                password=os.environ["DB_PASSWORD"],
-                database=os.environ["DB_NAME"]
-            )
-            print("✅ Database connection established")
-        except Error as e:
-            print(f"❌ Database connection failed: {e}")
-            raise
+firebase_config = dict(st.secrets["firebase"])
+firebase_config["private_key"] = firebase_config["private_key"].replace("\\n", "\n")
 
 
-    def disconnect(self):
-        """Close the database connection."""
-        if self.connection.is_connected():
-            self.connection.close()
-            print(" Database connection closed")
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_config)
+    firebase_admin.initialize_app(cred)
 
+firestore_db = firestore.client()
+
+class FirebaseDatabase:
+    def __init__(self, firestore_db):
+        self.db = firestore_db
+        print("\u2705 Firebase connection established")
+    
     def initialize_db(self):
-        """Create tables if they don't exist (idempotent)."""
-        try:
-            cursor = self.connection.cursor()
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tsp_game_results (
-                    game_id INT AUTO_INCREMENT PRIMARY KEY,
-                    player_name VARCHAR(50) NOT NULL,
-                    home_city CHAR(1) NOT NULL,
-                    selected_cities JSON NOT NULL,
-                    user_path TEXT NOT NULL,
-                    user_distance INT NOT NULL,
-                    is_optimal BOOLEAN NOT NULL,
-                    best_path TEXT NOT NULL,
-                    best_distance INT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tsp_algorithm_performance (
-                    performance_id INT AUTO_INCREMENT PRIMARY KEY,
-                    game_id INT NOT NULL,
-                    algorithm_name VARCHAR(20) NOT NULL,
-                    execution_time FLOAT NOT NULL,
-                    FOREIGN KEY (game_id) REFERENCES tsp_game_results(game_id)
-                )
-            """)
-
-            self.connection.commit()
-            print(" Database tables initialized")
-        except Error as e:
-            print(f" Failed to initialize database: {e}")
-            raise
+        # Firestore is schemaless, so no need to pre-create tables/collections
+        print("\u2705 No schema setup required for Firestore")
 
     def save_game_result(
         self, player_name, home_city, selected_cities, user_path,
-        user_distance, is_correct, is_optimal, best_path, best_distance
+        user_distance, is_optimal, best_path, best_distance  # Removed is_correct
     ):
-        # Add validation for player_name
         if not player_name or not isinstance(player_name, str):
             print("Invalid player name")
             return None
-            
+
         try:
-            cursor = self.connection.cursor()
-            selected_cities_json = json.dumps(list(selected_cities) if selected_cities else [])
-            query = """
-                INSERT INTO tsp_game_results (
-                    player_name, home_city, selected_cities,
-                    user_path, user_distance, is_optimal,
-                    best_path, best_distance
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, (
-                player_name.strip(),  # Clean the name
-                home_city, 
-                selected_cities_json,
-                user_path, 
-                user_distance, 
-                is_optimal,
-                best_path, 
-                best_distance
-            ))
-            game_id = cursor.lastrowid
-            self.connection.commit()
-            return game_id
-        except Error as e:
-            print(f"Failed to save game result: {e}")
-            self.connection.rollback()
+            game_data = {
+                "player_name": player_name.strip(),
+                "home_city": home_city,
+                "selected_cities": list(selected_cities) if selected_cities else [],
+                "user_path": user_path,
+                "user_distance": user_distance,
+                "is_optimal": is_optimal,  # Now correctly used
+                "best_path": best_path,
+                "best_distance": best_distance,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            }
+            # Correctly create a new document reference and set data
+            doc_ref = self.db.collection("tsp_game_results").document()
+            doc_ref.set(game_data)
+            print("\u2705 Game result saved")
+            return doc_ref.id  # Return the document ID
+        except Exception as e:
+            print(f"\u274C Failed to save game result: {e}")
             return None
 
     def save_algorithm_performance(self, game_id, algorithm_data):
-        """Save algorithm performance metrics."""
-        if game_id is None:
-            print(" Invalid algorithm save: Invalid game_id")
+        if not game_id:
+            print("\u274C Invalid game_id")
             return
 
         try:
-            cursor = self.connection.cursor()
-            query = """
-                INSERT INTO tsp_algorithm_performance (
-                    game_id, algorithm_name, execution_time
-                ) VALUES (%s, %s, %s)
-            """
             for algo_name, exec_time in algorithm_data:
-                cursor.execute(query, (game_id, algo_name, exec_time))
-            self.connection.commit()
-        except Error as e:
-            print(f" Failed to save algorithm performance: {e}")
-            self.connection.rollback()
+                self.db.collection("tsp_algorithm_performance").add({
+                    "game_id": game_id,
+                    "algorithm_name": algo_name,
+                    "execution_time": exec_time,
+                    "timestamp": firestore.SERVER_TIMESTAMP
+                })
+            print("\u2705 Algorithm performance saved")
+        except Exception as e:
+            print(f"\u274C Failed to save algorithm performance: {e}")
 
-    def query(self, query, params=None):
-        """Execute a generic SELECT query and return results."""
+    def query(self, collection_name, filters=None, order_by=None, direction=firestore.Query.DESCENDING, limit=None):
         try:
-            cursor = self.connection.cursor(dictionary=True)
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            results = cursor.fetchall()
-            cursor.close()
-            return results
-        except Error as e:
-            print(f" Failed to execute query: {e}")
+            collection_ref = self.db.collection(collection_name)
+            if filters:
+                for field, op, value in filters:
+                    collection_ref = collection_ref.where(field, op, value)
+            if order_by:
+                collection_ref = collection_ref.order_by(order_by, direction=direction)
+            if limit:
+                collection_ref = collection_ref.limit(limit)
+            docs = collection_ref.stream()
+            return [{"id": doc.id, **doc.to_dict()} for doc in docs]
+        except Exception as e:
+            print(f"\u274C Failed to execute query: {e}")
             return []
 
-
-db = Database()
+# Initialize database connection
+db = FirebaseDatabase(firestore_db)
+db.initialize_db()
