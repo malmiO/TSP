@@ -3,9 +3,10 @@ import os
 import mysql.connector
 from mysql.connector import Error
 from dotenv import load_dotenv
+import streamlit as st
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 
 class Database:
     def __init__(self):
@@ -13,17 +14,17 @@ class Database:
         self.connect()
 
     def connect(self):
-        """Establish a connection to the MySQL database."""
+        """Establish a connection to the MySQL database using Streamlit secrets."""
         try:
             self.connection = mysql.connector.connect(
-                host=os.getenv("DB_HOST"),
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASSWORD"),
-                database=os.getenv("DB_NAME")
+                host=st.secrets["mysql"]["host"],
+                user=st.secrets["mysql"]["user"],
+                password=st.secrets["mysql"]["password"],
+                database=st.secrets["mysql"]["database"]
             )
-            print(" Database connection established")
+            print("✅ Database connection established")
         except Error as e:
-            print(f" Database connection failed: {e}")
+            print(f"❌ Database connection failed: {e}")
             raise
 
     def disconnect(self):
