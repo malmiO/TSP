@@ -17,16 +17,20 @@ class Database:
         """Establish a connection to the MySQL database using Streamlit secrets."""
         try:
             self.connection = mysql.connector.connect(
-                host=st.secrets["mysql"]["host"],
-                port=st.secrets["mysql"]["port"],
-                user=st.secrets["mysql"]["user"],
-                password=st.secrets["mysql"]["password"],
-                database=st.secrets["mysql"]["database"]
-            )
+                host=st.secrets["connections"]["mysql"]["host"],
+                port=st.secrets["connections"]["mysql"]["port"],
+                user=st.secrets["connections"]["mysql"]["username"],
+                password=st.secrets["connections"]["mysql"]["password"],
+                database=st.secrets["connections"]["mysql"]["database"]
+    )
             print("✅ Database connection established")
         except Error as e:
             print(f"❌ Database connection failed: {e}")
             raise
+        
+        if not st.secrets.get("connections", {}).get("mysql"):
+            raise ValueError("Missing MySQL config in Streamlit secrets")
+
 
     def disconnect(self):
         """Close the database connection."""
